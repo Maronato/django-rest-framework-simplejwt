@@ -1,29 +1,39 @@
+from typing import Optional
 import jwt
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 from jwt import InvalidAlgorithmError, InvalidTokenError, algorithms
 
+from .jwk.models import JWK
 from .exceptions import TokenBackendError
 from .utils import format_lazy
 
 ALLOWED_ALGORITHMS = (
-    'HS256',
-    'HS384',
-    'HS512',
-    'RS256',
-    'RS384',
-    'RS512',
+    "HS256",
+    "HS384",
+    "HS512",
+    "RS256",
+    "RS384",
+    "RS512",
 )
 
 
 class TokenBackend:
-    def __init__(self, algorithm, signing_key=None, verifying_key=None, audience=None, issuer=None):
+    def __init__(
+        self,
+        algorithm,
+        signing_key=None,
+        verifying_key=None,
+        audience=None,
+        issuer=None,
+    ):
         self._validate_algorithm(algorithm)
 
         self.algorithm = algorithm
         self.signing_key = signing_key
         self.audience = audience
         self.issuer = issuer
-        if algorithm.startswith('HS'):
+        if algorithm.startswith("HS"):
             self.verifying_key = signing_key
         else:
             self.verifying_key = verifying_key
@@ -34,10 +44,46 @@ class TokenBackend:
         algorithms that require it
         """
         if algorithm not in ALLOWED_ALGORITHMS:
-            raise TokenBackendError(format_lazy(_("Unrecognized algorithm type '{}'"), algorithm))
+            raise TokenBackendError(
+                format_lazy(_("Unrecognized algorithm type '{}'"), algorithm)
+            )
 
         if algorithm in algorithms.requires_cryptography and not algorithms.has_crypto:
-            raise TokenBackendError(format_lazy(_("You must have cryptography installed to use {}."), algorithm))
+            raise TokenBackendError(
+                format_lazy(
+                    _("You must have cryptography installed to use {}."), algorithm
+                )
+            )
+
+    def has_jwk(self):
+        return (
+            self.algorithm.startswith("RS")
+            and "rest_framework_simplejwt.jwk" in settings.INSTALLED_APPS
+        )
+
+    def get_jwk(self, kid: Optional[str] = None):
+        if self.has_jwk():
+            if kid is not None:
+                try:
+                    jwk: JWK = JWK.objects.get(key_id=kid)
+                except JWK.DoesNotExist:
+                    raise TokenBackendError(
+                        format_lazy(_("Key with ID '{}' does not exist."), kid)
+                    )
+            else:
+                jwk = JWK.get_current_jwk()
+
+            if jwk.is_expired:
+                raise TokenBackendError(
+                    format_lazy(_("Key with ID '{}' is expired."), jwk.kid)
+                )
+            return jwk
+        return None
+
+    def get_headers(self, jwk: Optional[JWK]):
+        return {
+            "kid": jwk.kid,
+        }
 
     def encode(self, payload):
         """
@@ -45,14 +91,25 @@ class TokenBackend:
         """
         jwt_payload = payload.copy()
         if self.audience is not None:
-            jwt_payload['aud'] = self.audience
+            jwt_payload["aud"] = self.audience
         if self.issuer is not None:
-            jwt_payload['iss'] = self.issuer
+            jwt_payload["iss"] = self.issuer
 
-        token = jwt.encode(jwt_payload, self.signing_key, algorithm=self.algorithm)
+        key = self.signing_key
+        headers = None
+        algorithm = self.algorithm
+        if self.has_jwk():
+            jwk = self.get_jwk()
+            algorithm = jwk.algorithm
+            key = jwk.private_key
+            headers = self.get_headers(jwk)
+
+        token = jwt.encode(
+            payload=jwt_payload, key=key, algorithm=algorithm, headers=headers
+        )
         if isinstance(token, bytes):
             # For PyJWT <= 1.7.1
-            return token.decode('utf-8')
+            return token.decode("utf-8")
         # For PyJWT >= 2.0.0a1
         return token
 
@@ -65,10 +122,24 @@ class TokenBackend:
         signature check fails, or if its 'exp' claim indicates it has expired.
         """
         try:
-            return jwt.decode(token, self.verifying_key, algorithms=[self.algorithm], verify=verify,
-                              audience=self.audience, issuer=self.issuer,
-                              options={'verify_aud': self.audience is not None})
+            key = self.verifying_key
+            algorithm = self.algorithm
+            if self.has_jwk():
+                kid = jwt.get_unverified_header(token).get("kid")
+                jwk = self.get_jwk(kid)
+                algorithm = jwk.algorithm
+                key = jwk.public_key
+
+            return jwt.decode(
+                token,
+                key=key,
+                algorithms=[algorithm],
+                verify=verify,
+                audience=self.audience,
+                issuer=self.issuer,
+                options={"verify_aud": self.audience is not None},
+            )
         except InvalidAlgorithmError as ex:
-            raise TokenBackendError(_('Invalid algorithm specified')) from ex
+            raise TokenBackendError(_("Invalid algorithm specified")) from ex
         except InvalidTokenError:
-            raise TokenBackendError(_('Token is invalid or expired'))
+            raise TokenBackendError(_("Token is invalid or expired"))

@@ -17,6 +17,9 @@ DEFAULTS = {
     'UPDATE_LAST_LOGIN': False,
 
     'ALGORITHM': 'HS256',
+    'KEY_SIZE': 2048,
+    'PUBLIC_EXPONENT': 65537,
+    'JWK_LIFETIME': timedelta(days=7),
     'SIGNING_KEY': settings.SECRET_KEY,
     'VERIFYING_KEY': None,
     'AUDIENCE': None,
