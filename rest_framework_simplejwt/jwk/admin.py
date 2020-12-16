@@ -16,6 +16,3 @@ class JWKAdmin(admin.ModelAdmin):
         "key_id",
         "algorithm",
     )
-
-    def get_readonly_fields(self, *args, **kwargs):
-        return [f.name for f in self.model._meta.fields]
